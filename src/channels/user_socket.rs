@@ -2,12 +2,14 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
+use axum::extract::Query;
 use axum::response::IntoResponse;
 use axum::Extension;
 use axum::{routing::get, Router};
 use futures::lock::Mutex;
 use futures::stream::{SplitSink, StreamExt};
 use futures::SinkExt;
+use serde::Deserialize;
 use serde_json::{json, Value};
 use tokio::sync::broadcast;
 use uuid::Uuid;
@@ -17,19 +19,32 @@ struct SocketState {
     tx: broadcast::Sender<String>,
 }
 
+impl Default for SocketState {
+    fn default() -> Self {
+        SocketState {
+            tx: broadcast::channel(1024).0,
+        }
+    }
+}
+
 #[derive(Debug)]
+#[allow(dead_code)]
 struct Socket {
     id: Uuid,
-    state: Arc<SocketState>,
+    state: Arc<Mutex<SocketState>>,
     sender: Arc<Mutex<SplitSink<WebSocket, Message>>>,
     join_ref: Option<String>,
     msg_ref: Option<String>,
     topic: Option<String>,
     channels: HashMap<String, Channel>,
+    assigns: Value,
 }
 
 impl Socket {
-    pub fn new(sender: Arc<Mutex<SplitSink<WebSocket, Message>>>, state: Arc<SocketState>) -> Self {
+    pub fn new(
+        sender: Arc<Mutex<SplitSink<WebSocket, Message>>>,
+        state: Arc<Mutex<SocketState>>,
+    ) -> Self {
         Self {
             id: Uuid::new_v4(),
             state,
@@ -38,20 +53,21 @@ impl Socket {
             msg_ref: None,
             topic: None,
             channels: HashMap::new(),
+            assigns: Value::default(),
         }
     }
 
-    pub fn update(&mut self, message: Value) {
+    fn update(&mut self, message: Value) {
         self.set_join_ref(message[0].clone());
         self.set_msg_ref(message[1].clone());
         self.set_topic(message[2].clone());
     }
 
-    pub fn topic(&self) -> Option<String> {
+    fn topic(&self) -> Option<String> {
         self.topic.clone()
     }
 
-    pub fn join_channel(&mut self, topic: String) {
+    fn join_channel(&mut self, topic: String) {
         let channel = Channel::new(
             topic.clone(),
             self.join_ref.clone().unwrap(),
@@ -60,11 +76,11 @@ impl Socket {
         self.channels.entry(topic).or_insert(channel);
     }
 
-    pub fn leave_channel(&mut self, topic: String) -> Option<Channel> {
+    fn leave_channel(&mut self, topic: String) -> Option<Channel> {
         self.channels.remove(&topic)
     }
 
-    pub async fn close_channel(&self, channel: Channel) {
+    async fn close_channel(&self, channel: Channel) {
         let message = Socket::reply_message(
             Some(channel.join_ref),
             Some(channel.msg_ref),
@@ -87,7 +103,8 @@ impl Socket {
     }
 
     async fn boardcast(&self, topic: &str, event: &str, message: Value) {
-        self.do_boardcast(None, "boardcast", topic, event, message);
+        self.do_boardcast(None, "boardcast", topic, event, message)
+            .await;
     }
 
     async fn boardcast_from(&self, topic: &str, event: &str, message: Value) {
@@ -97,7 +114,8 @@ impl Socket {
             topic,
             event,
             message,
-        );
+        )
+        .await;
     }
 
     async fn send(&self, message: Value) {
@@ -111,12 +129,25 @@ impl Socket {
         }
     }
 
-    async fn reply_ok(&self) {
-        self.push("phx_reply", json!({"response": {}, "status": "ok"}))
-            .await;
+    async fn reply_ok(&self, response: Value) {
+        self.do_reply("ok", response).await;
     }
 
-    fn do_boardcast(
+    async fn reply_error(&self, response: Value) {
+        self.do_reply("error", response).await;
+    }
+
+    async fn do_reply(&self, status: &str, response: Value) {
+        let message = if response.is_null() {
+            json!({"response": {}, "status": status})
+        } else {
+            json!({"response": response, "status": status})
+        };
+
+        self.push("phx_reply", message).await;
+    }
+
+    async fn do_boardcast(
         &self,
         from: Option<String>,
         action: &str,
@@ -138,7 +169,7 @@ impl Socket {
             "payload": message
         });
 
-        let _ = self.state.tx.send(data.to_string());
+        let _ = self.state.lock().await.tx.send(data.to_string());
     }
 
     fn set_join_ref(&mut self, join_ref: Value) {
@@ -199,16 +230,24 @@ impl Channel {
     }
 }
 
+#[derive(Debug, Deserialize)]
+#[allow(dead_code)]
+struct Params {
+    token: Option<String>,
+}
+
 async fn user_socket(
     ws: WebSocketUpgrade,
-    Extension(state): Extension<Arc<SocketState>>,
+    Query(params): Query<Params>,
+    Extension(state): Extension<Arc<Mutex<SocketState>>>,
 ) -> impl IntoResponse {
+    tracing::info!("params: {:?}", params);
     ws.on_upgrade(|socket| websocket(socket, state))
 }
 
-async fn websocket(stream: WebSocket, state: Arc<SocketState>) {
+async fn websocket(stream: WebSocket, state: Arc<Mutex<SocketState>>) {
     let (sender, mut receiver) = stream.split();
-    let mut rx = state.tx.subscribe();
+    let mut rx = state.lock().await.tx.subscribe();
 
     let sender = Arc::new(Mutex::new(sender));
     let socket = Arc::new(Mutex::new(Socket::new(sender.clone(), state.clone())));
@@ -270,22 +309,22 @@ async fn handle_event_heartbeat(socket: Arc<Mutex<Socket>>, message: Value) {
     let topic = message[2].as_str().unwrap();
     let event = message[3].as_str().unwrap();
     if topic == "phoenix" && event == "heartbeat" {
-        socket.lock().await.reply_ok().await;
+        socket.lock().await.reply_ok(Value::Null).await;
     }
 }
 
 async fn handle_event_phx_join(socket: Arc<Mutex<Socket>>, message: Value) {
     let topic = message[2].as_str().unwrap().to_string();
     let mut socket = socket.lock().await;
-    socket.join_channel(topic);
-    socket.reply_ok().await;
+    socket.join_channel(topic.clone());
+    socket.reply_ok(Value::Null).await;
 }
 
 async fn handle_event_phx_leave(socket: Arc<Mutex<Socket>>, message: Value) {
     let topic = message[2].as_str().unwrap().to_string();
     let mut socket = socket.lock().await;
     if let Some(channel) = socket.leave_channel(topic) {
-        socket.reply_ok().await;
+        socket.reply_ok(Value::Null).await;
         socket.close_channel(channel).await;
     }
 }
@@ -304,10 +343,7 @@ async fn handle_event(socket: Arc<Mutex<Socket>>, message: Value) {
 }
 
 pub fn router() -> Router {
-    let (tx, _rx) = broadcast::channel(1024);
-    let socket_state = Arc::new(SocketState { tx });
-
     Router::new()
         .route("/socket/websocket", get(user_socket))
-        .layer(Extension(socket_state))
+        .layer(Extension(Arc::new(Mutex::new(SocketState::default()))))
 }
