@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::hash::Hash;
 use std::sync::Arc;
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
@@ -17,12 +18,30 @@ use uuid::Uuid;
 #[derive(Debug)]
 struct SocketState {
     tx: broadcast::Sender<String>,
+    assigns: HashMap<String, HashMap<String, Value>>,
 }
 
 impl Default for SocketState {
     fn default() -> Self {
         SocketState {
             tx: broadcast::channel(1024).0,
+            assigns: HashMap::default(),
+        }
+    }
+}
+
+impl SocketState {
+    fn assign(&mut self, topic: String, key: String, val: Value) {
+        let topic_assigns = self.assigns.entry(topic).or_insert(HashMap::default());
+        topic_assigns.insert(key, val);
+    }
+
+    fn get_assign(&self, topic: String, key: String) -> Value {
+        let default = json!({});
+
+        match self.assigns.get(&topic) {
+            Some(assigns) => assigns.get(&key).cloned().unwrap_or(default),
+            None => default,
         }
     }
 }
@@ -57,6 +76,10 @@ impl Socket {
         }
     }
 
+    fn assign(&mut self, val: Value) {
+        self.assigns = val;
+    }
+
     fn update(&mut self, message: Value) {
         self.set_join_ref(message[0].clone());
         self.set_msg_ref(message[1].clone());
@@ -65,6 +88,10 @@ impl Socket {
 
     fn topic(&self) -> Option<String> {
         self.topic.clone()
+    }
+
+    fn id(&self) -> String {
+        self.id.clone().to_string()
     }
 
     fn join_channel(&mut self, topic: String) {
@@ -230,15 +257,9 @@ impl Channel {
     }
 }
 
-#[derive(Debug, Deserialize)]
-#[allow(dead_code)]
-struct Params {
-    token: Option<String>,
-}
-
 async fn user_socket(
     ws: WebSocketUpgrade,
-    Query(params): Query<Params>,
+    Query(params): Query<Value>,
     Extension(state): Extension<Arc<Mutex<SocketState>>>,
 ) -> impl IntoResponse {
     tracing::info!("params: {:?}", params);
@@ -247,21 +268,19 @@ async fn user_socket(
 
 async fn websocket(stream: WebSocket, state: Arc<Mutex<SocketState>>) {
     let (sender, mut receiver) = stream.split();
-    let mut rx = state.lock().await.tx.subscribe();
-
     let sender = Arc::new(Mutex::new(sender));
     let socket = Arc::new(Mutex::new(Socket::new(sender.clone(), state.clone())));
-    let rx_socket = socket.clone();
+    let recv_task_socket = socket.clone();
+    let send_task_socket = socket.clone();
+    let mut rx = state.lock().await.tx.subscribe();
 
+    // from clint
     let mut recv_task = tokio::spawn(async move {
         while let Some(Ok(Message::Text(message))) = receiver.next().await {
             let message: Value = serde_json::from_str(&message).unwrap();
-            tracing::info!("received text: {:?}", message);
+            let socket = recv_task_socket.clone();
 
-            {
-                let mut socket = socket.lock().await;
-                socket.update(message.clone());
-            }
+            recv_task_socket.lock().await.update(message.clone());
 
             if message[3].is_string() {
                 match message[3].as_str().unwrap() {
@@ -274,25 +293,23 @@ async fn websocket(stream: WebSocket, state: Arc<Mutex<SocketState>>) {
         }
     });
 
+    // from pubsub
     let mut send_task = tokio::spawn(async move {
         while let Ok(message) = rx.recv().await {
+            let socket = send_task_socket.lock().await;
             let message: Value = serde_json::from_str(&message).unwrap();
             let action = message["action"].as_str().unwrap();
 
-            {
-                let socket = rx_socket.lock().await;
+            match action {
+                "boardcast" => socket.send(message["payload"].clone()).await,
+                "boardcast_from" => {
+                    let from = message["from"].as_str().unwrap();
 
-                match action {
-                    "boardcast" => socket.send(message["payload"].clone()).await,
-                    "boardcast_from" => {
-                        let from = message["from"].as_str().unwrap();
-
-                        if from != socket.id.to_string().as_str() {
-                            socket.send(message["payload"].clone()).await;
-                        }
+                    if from != socket.id().as_str() {
+                        socket.send(message["payload"].clone()).await;
                     }
-                    _ => (),
                 }
+                _ => (),
             }
         }
     });
@@ -308,8 +325,9 @@ async fn websocket(stream: WebSocket, state: Arc<Mutex<SocketState>>) {
 async fn handle_event_heartbeat(socket: Arc<Mutex<Socket>>, message: Value) {
     let topic = message[2].as_str().unwrap();
     let event = message[3].as_str().unwrap();
+    let socket = socket.lock().await;
     if topic == "phoenix" && event == "heartbeat" {
-        socket.lock().await.reply_ok(Value::Null).await;
+        socket.reply_ok(Value::Null).await;
     }
 }
 
@@ -318,6 +336,11 @@ async fn handle_event_phx_join(socket: Arc<Mutex<Socket>>, message: Value) {
     let mut socket = socket.lock().await;
     socket.join_channel(topic.clone());
     socket.reply_ok(Value::Null).await;
+
+    // {
+    //     let mut state = socket.state.lock().await;
+    //     state.assign(topic.clone(), socket.id(), json!({"id": socket.id()}));
+    // }
 }
 
 async fn handle_event_phx_leave(socket: Arc<Mutex<Socket>>, message: Value) {
