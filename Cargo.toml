@@ -14,4 +14,4 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 serde_json = "1.0"
 
-phoenix_ws = { git = "https://github.com/nanlong/phoenix_ws.git" }
+phoenix_ws = { git = "https://github.com/nanlong/phoenix_ws.git", rev = "c25de90" }

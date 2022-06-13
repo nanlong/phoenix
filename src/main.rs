@@ -24,8 +24,9 @@ async fn main() {
         let socket = socket.lock().await;
 
         socket
-            .boardcast("room:*", "boardcast", json!({"message": "hello world!"}))
+            .boardcast("boardcast", json!({"message": "hello world!"}))
             .await;
+
         socket.reply("ok", Value::Null).await;
     });
 

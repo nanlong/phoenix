@@ -533,7 +533,7 @@ dependencies = [
 [[package]]
 name = "phoenix_ws"
 version = "0.1.0"
-source = "git+https://github.com/nanlong/phoenix_ws.git#9c6bbcb4d3017dcec402451e8126ff88132eda01"
+source = "git+https://github.com/nanlong/phoenix_ws.git?rev=c25de90#c25de90aa7066f78433f45758987fc8af1940b26"
 dependencies = [
  "axum",
  "axum-extra",
