@@ -6,21 +6,24 @@ use axum::extract::{Query, WebSocketUpgrade};
 use axum::response::IntoResponse;
 use axum::routing::get;
 use axum::{Extension, Router};
-use futures::StreamExt;
+use futures::{Future, StreamExt};
 use serde_json::Value;
 use tokio::sync::Mutex;
 
+use super::async_callback::AsyncCallback;
 use super::socket::{Socket, SocketState};
 use super::user_channel::UserChannel;
 
 pub struct UserSocket {
     channels: HashMap<String, Arc<Mutex<UserChannel>>>,
+    handles: HashMap<String, Box<dyn AsyncCallback + Send + Sync>>,
 }
 
 impl UserSocket {
     pub fn new() -> Self {
         Self {
             channels: HashMap::new(),
+            handles: HashMap::new(),
         }
     }
 
@@ -29,16 +32,47 @@ impl UserSocket {
             .insert(channel.topic(), Arc::new(Mutex::new(channel)));
     }
 
+    pub fn join<F, R>(&mut self, callback: F)
+    where
+        F: Fn(Value, Arc<Mutex<Socket>>) -> R + Send + Sync + 'static,
+        R: Future<Output = ()> + Send + 'static,
+    {
+        self.handle_event("join", callback);
+    }
+
+    fn handle_event<F, R>(&mut self, event: &str, callback: F)
+    where
+        F: Fn(Value, Arc<Mutex<Socket>>) -> R + Send + Sync + 'static,
+        R: Future<Output = ()> + Send + 'static,
+    {
+        self.handles.insert(event.to_string(), Box::new(callback));
+    }
+
+    pub async fn dispatch(&mut self, event: &str, payload: Value, socket: Arc<Mutex<Socket>>) {
+        if let Some(callback) = self.handles.get(event) {
+            callback.call(payload, socket.clone()).await;
+        };
+    }
+
     async fn websocket(
         ws: WebSocketUpgrade,
-        Query(params): Query<Value>,
+        Query(payload): Query<Value>,
         Extension(state): Extension<Arc<Mutex<SocketState>>>,
         Extension(user_socket): Extension<Arc<Mutex<UserSocket>>>,
     ) -> impl IntoResponse {
-        // todo: handle join failed
-        tracing::info!("params: {:?}", params["token"]);
         let socket = Arc::new(Mutex::new(Socket::default()));
-        ws.on_upgrade(|stream| Self::handle_stream(stream, state, socket, user_socket))
+
+        user_socket
+            .lock()
+            .await
+            .dispatch("join", payload, socket.clone())
+            .await;
+
+        if socket.lock().await.is_joined() {
+            ws.on_upgrade(|stream| Self::handle_stream(stream, state, socket, user_socket))
+        } else {
+            (axum::http::StatusCode::BAD_REQUEST, "Bad Request").into_response()
+        }
     }
 
     async fn handle_stream(
@@ -104,10 +138,10 @@ impl UserSocket {
         }
     }
 
-    pub fn router(user_socket: Arc<Mutex<UserSocket>>) -> Router {
+    pub fn router(user_socket: UserSocket) -> Router {
         Router::new()
             .route("/socket/websocket", get(Self::websocket))
-            .layer(Extension(user_socket))
+            .layer(Extension(Arc::new(Mutex::new(user_socket))))
             .layer(Extension(Arc::new(Mutex::new(SocketState::default()))))
     }
 }

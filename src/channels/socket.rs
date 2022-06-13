@@ -23,6 +23,7 @@ impl Default for SocketState {
 #[derive(Debug, Clone)]
 pub struct Socket {
     id: String,
+    joined: bool,
     sender: Option<Arc<Mutex<SplitSink<WebSocket, Message>>>>,
     state: Option<Arc<Mutex<SocketState>>>,
     topic: Option<String>,
@@ -35,6 +36,7 @@ impl Default for Socket {
     fn default() -> Self {
         Self {
             id: nanoid!(),
+            joined: false,
             sender: None,
             state: None,
             topic: None,
@@ -56,6 +58,14 @@ impl Socket {
 
     pub fn assigns(&self) -> &Map<String, Value> {
         &self.assigns
+    }
+
+    pub fn joined(&mut self) {
+        self.joined = true;
+    }
+
+    pub fn is_joined(&self) -> bool {
+        self.joined
     }
 
     pub fn update(
