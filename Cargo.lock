@@ -520,17 +520,28 @@ checksum = "d4fd5641d01c8f18a23da7b6fe29298ff4b55afcccdf78973b24cf3175fee32e"
 name = "phoenix"
 version = "0.1.0"
 dependencies = [
- "async-trait",
  "axum",
  "axum-extra",
- "futures",
- "nanoid",
- "serde",
+ "phoenix_ws",
  "serde_json",
  "tokio",
  "tower-http",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "phoenix_ws"
+version = "0.1.0"
+source = "git+https://github.com/nanlong/phoenix_ws.git#9c6bbcb4d3017dcec402451e8126ff88132eda01"
+dependencies = [
+ "axum",
+ "axum-extra",
+ "futures",
+ "nanoid",
+ "serde_json",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -669,20 +680,6 @@ name = "serde"
 version = "1.0.137"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "61ea8d54c77f8315140a05f4c7237403bf38b72704d031543aa1d16abbf517d1"
-dependencies = [
- "serde_derive",
-]
-
-[[package]]
-name = "serde_derive"
-version = "1.0.137"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1f26faba0c3959972377d3b2d306ee9f71faee9714294e41bb777f83f88578be"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn",
-]
 
 [[package]]
 name = "serde_json"

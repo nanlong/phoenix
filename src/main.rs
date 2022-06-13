@@ -5,7 +5,7 @@ use axum_extra::routing::SpaRouter;
 use serde_json::{json, Value};
 use tower_http::trace::TraceLayer;
 
-use phoenix::channels::{user_channel::UserChannel, user_socket::UserSocket};
+use phoenix_ws::{user_channel::UserChannel, user_socket::UserSocket};
 
 #[tokio::main]
 async fn main() {
