@@ -1,29 +1,53 @@
-use std::net::SocketAddr;
+use std::{net::SocketAddr, sync::Arc};
 
 use axum::{response::Html, routing::get};
 use axum_extra::routing::SpaRouter;
+use serde_json::{json, Value};
+use tokio::sync::Mutex;
 use tower_http::trace::TraceLayer;
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
-use phoenix::channels;
+use phoenix::channels::{socket::Socket, user_channel::UserChannel, user_socket::UserSocket};
 
 #[tokio::main]
 async fn main() {
-    tracing_subscriber::registry()
-        .with(tracing_subscriber::EnvFilter::new(
-            std::env::var("RUST_LOG").unwrap_or_else(|_| "phoenix=debug,tower_http=debug".into()),
-        ))
-        .with(tracing_subscriber::fmt::layer())
-        .init();
+    tracing_subscriber::fmt().init();
+
+    let mut user_socket = UserSocket::new();
+
+    let mut user_channel = UserChannel::new("room:*");
+
+    // user_channel.join(|_payload, socket: Arc<Mutex<Socket>>| async move {
+    //     let socket = socket.lock().await;
+
+    //     socket
+    //         .boardcast("room:*", "boardcast", json!({"message": "hello world!"}))
+    //         .await;
+    //     socket.reply("ok", Value::Null).await;
+    // });
+
+    user_channel.handle_event("test", |payload, socket| async move {
+        tracing::info!("{}", payload);
+        let socket = socket.lock().await;
+        socket.reply("ok", Value::Null).await;
+    });
+
+    // user_channel.handle_event("test2", |payload, socket: Arc<Mutex<Socket>>| async move {
+    //     tracing::info!("{}", payload);
+
+    //     socket.lock().await.reply("ok", Value::Null).await;
+    // });
+
+    user_socket.channel(user_channel);
 
     let app: _ = axum::Router::new()
         .route("/", get(index))
         .merge(SpaRouter::new("/assets", "./priv/static/assets"))
-        .merge(channels::user_socket::router())
+        .merge(UserSocket::router(Arc::new(Mutex::new(user_socket))))
         .layer(TraceLayer::new_for_http());
 
     let addr = SocketAddr::from(([127, 0, 0, 1], 4001));
-    tracing::debug!("listening on {}", addr);
+    tracing::info!("listening on {}", addr);
+
     axum::Server::bind(&addr)
         .serve(app.into_make_service())
         .await
